@@ -1,0 +1,246 @@
+#!/usr/local/bin/perl -w
+
+use strict;
+use Getopt::Long;
+
+unless (defined $ARGV[0]){
+    print "compare_fields <options> key_file|-key query_file|-query\n",
+    "[-not|-n|-kf <key_field>|-qf <query_field>|-d <delimiter>|-help|-h|",
+    "-sep|-all|-k <keep_field(s)>|i|-r <kf,qf>]\n";
+    exit;
+} # brief help syntax
+
+my $VERSION = '0.9';
+my %opts = ();
+my $result = GetOptions(\%opts,'key','query','sep=s','v+','not|n',"kf=i","qf=i","d=s",
+    'help|h',"k=s","all","i","r=s");
+
+if ($opts{"help"}) { exec "perldoc $0" }
+
+my $keyfile = $opts{"key"} || shift; #or die "No key file specified\n";
+my $datafile = $opts{"query"} || shift; #or die "No query file specified\n";
+
+my $kf = $opts{"kf"} || 0;
+my $qf = $opts{"qf"} || 0;
+my $keep = $opts{"k"} || $kf;
+my $split = $opts{"d"} || '\t';
+my $sep = $opts{'sep'} || "\t";
+my $rep_from = ""; # field from keyfile to keep for substitution
+my $rep_in = ""; # field from queryfile to substitute
+my %subdat = (); # hash to hold data for subs - this allows different fields for sub than keep
+my $entry = "";
+my @fields = ();
+my %master = ();
+my @hold = ();
+my $keyin = my $queryin = "";
+
+if ($opts{"r"}) {
+    die "Can't do substitution on unmatched lines with -n!\n" if $opts{"not"};
+    die "Argument for -r must be n,n, where first n is keyfile field to keep and " .
+    	"second n is queryfile field to replace.\n" unless $opts{"r"} =~ /^(\d+),(\d+)$/;
+    $rep_from = $1;
+    $rep_in = $2;
+} # if field substitution requested
+
+if ($keep && $keep =~ /\.\./) {
+    my($x,$y) = split(/\.\./,$keep);
+    foreach my $n($x .. $y) { push(@hold,$n) }
+} # if
+elsif ($keep && $keep =~ /,/) { foreach my $n (split(/,/,$keep)) { push(@hold,$n) }}
+elsif (defined $keep) { @hold = ($keep) }
+else { die "huh?!?!" } # should have been defined as 0 by default at least
+
+if (-e $keyfile) {
+    open(KEYFILE,"$keyfile") or die "Cannot open $keyfile: $!";
+    $keyin = *KEYFILE;
+} 
+elsif ($opts{"key"}) { $keyin = *STDIN }
+else { die "No keyfile provided!: $!" }
+
+while(defined($entry = <$keyin>)) {
+    chomp($entry);
+    @fields = split(/$split/o,$entry);
+    if ($opts{'i'}) { $fields[$kf] = uc($fields[$kf]) }
+    if ($opts{"r"}) { $subdat{$fields[$kf]} = $fields[$rep_from] }
+    if ($opts{"all"}) {
+	$master{$fields[$kf]} = $entry;
+    } # if
+    else {
+    	# don't complain about nonexistant fields unless asked
+    	local $^W = 0 unless $opts{'v'};
+	$master{$fields[$kf]} = join($sep,@fields[@hold]);
+    } # elsif
+} # while
+if (-e $keyfile) { close KEYFILE or warn "Couldn't close KEYFILE: $!" }
+
+if (-e $datafile) {
+    open(DATAFILE,"$datafile") or die "Cannot open $datafile: $!";
+    $queryin = *DATAFILE;
+} 
+elsif ($opts{"query"}) { $queryin = *STDIN }
+else { die "No query file provided!: $!" }
+
+while(defined($entry = <$queryin>)) {
+    chomp($entry);
+    @fields = split(/$split/o,$entry);
+    my $key = $fields[$qf];
+    if ($opts{'i'}) { $key = uc($key) }
+    if ($master{$key} && ! $opts{"not"}) {
+    	if ($opts{"r"}) { $fields[$rep_in] = $subdat{$key} }
+	print join($sep,@fields);
+	print "$sep$master{$key}" if defined $opts{"k"} || $opts{"all"};
+	print "\n";
+    } # if
+    elsif(! $master{$key} && $opts{"not"}) {
+	print "$entry\n";
+    } # if
+} # while
+if (-e $datafile) { close DATAFILE or warn "couldn't close DATAFILE: $!" }
+
+__END__
+=head1 NAME
+
+compare_fields 
+
+=head1 SYNOPSIS
+
+compare_fields (too?) feature rich tool for comparing two files by a given field in each.
+
+=head1 DESCRIPTION
+
+compare_fields key_file|-key query_file|-query <options>
+
+options: -not|-n|-kf <key_field>|-qf <query_field>|-d <delimiter>|-help|-h|-sep|-all|-k <keep_field>|i
+
+Compare fields compares fields from two files, or a file and an input 
+stream ... or even the same file or stream against itself. Designed to replace 
+join (although with a different focus) and provide an anti- (or left outer) join.
+
+Default behavior is to compare the first fields (perl 0) of both files and
+print the lines in the query file that have a match against the key file. Note
+that the delimiter is used in a regular expresion. The query and key files
+do _not_ need to be sorted.
+
+examples:
+
+compare_fields key_file.tab query_file.tab -not -kf 2
+
+or
+
+compare_fields -not -d="," -kf=2 key_file.csv query_file.csv
+
+=head2 OPTIONS:
+
+=over 4
+
+=item *
+
+B<-key>
+
+use stdin for keyfile
+
+=item *
+
+B<-query>
+
+use stdin for queryfile
+
+=item *
+
+B<-not|-n>
+
+Prints records from query file I<not> matching the key file instead.
+
+=item *
+
+B<-kf> n
+
+Field in the key file to use in comparison. Counts from 0.
+
+=item *
+
+B<-qf> n
+
+Field in the query file to use in comparison. Counts from 0.
+
+=item *
+
+B<-d> "delimiter"
+
+Delimiter to use for splitting records (lines in the files) into
+fields. This value is used in a perl reg exp. Default is on tab. Make
+sure to escape shell characters or put delimiter in quotes. For example 
+-d "\s+" splits on contiguous white space.
+
+=item *
+
+B<-k> field_list
+
+Field(s) from key file to be appended to matching record printed from
+query file. You may specify a range of fields using I<-k n..n>, or a selection
+of fields with I<-k n,n,-n...> where n is an index position, and -n is the nth
+position from the end (-1 is the last field, -2 second to last, etc).
+returns "query_record<sep>key_field(s)", where sep is tab unless defined with -sep.
+
+=item *
+
+B<-all>
+
+Appends entire matching record from key file.
+
+=item *
+
+B<-sep> "output_delimiter"
+
+Seperator for output of fields held from key record. Defaults to tab.
+
+=item *
+
+B<-i>
+
+Case insensitive matching.
+
+=item *
+
+B<-r> n,n
+
+Replace field in output match from query file with value from field in key file. First
+n is field from key file to use, second n is field in query file to replace.
+
+=item *
+
+B<-v>
+
+Increase verbosity. More v's (-vv,-vvv) will return more error and debugging data. One
+v turns off warning supresion in places where non-fatal errors commonly occur due to
+inconsitant input. Three v's would be for very noisy output for debugging purposes.
+
+=item *
+
+B<-help|-h>
+
+This printout.
+
+=back
+
+=head1 TO DO
+
+Benchmark getting line count for keyfield and pre-sizing hashes vs. growing on fly
+
+Add some more comments and debugging output for $opt{'v'} > 1
+
+Work on the keep fields if/elsif set to allow ranges _and_ specific fields to
+be used together
+
+=head1 COPYRIGHT
+
+Copyright Sean Quinlan, Trustees of Boston University 1999-2001.
+
+=head1 AUTHOR
+
+Sean Quinlan, seanq@darwin.bu.edu
+
+Please email me with any changes you make or suggestions for changes/additions.
+Latest version is available from ftp://mcclintock.bu.edu/BMERC/perl/. Thank you!
+
+=cut

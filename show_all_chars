@@ -1,0 +1,24 @@
+#!/usr/local/bin/perl
+
+if($ARGV[0]=~/help|-h/i){
+    print <<HELP_LINES;
+    
+Prints \\n \\t \\r \\f literally, but still prints blank spaces as just that.
+Final new line to clear command line printed by script.
+
+Copyright Sean Quinlan, Trustees of Boston University 1999.
+Orig. written by James Freeman
+
+HELP_LINES
+exit;
+}#if
+
+$count = 0;
+while(<>) {
+    s/\n/\\n/g;
+    s/\t/\\t/g;
+    s/\r/\\r/g;
+    s/\f/\\f/g;
+    print;
+}				
+print"\n"; # clears command line

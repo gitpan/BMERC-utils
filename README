@@ -1,0 +1,19 @@
+This is just a few misc. utils that I use a lot. They aren't really written with distribution in mind, so please forgive me if they are a little rough in spots. Special mention is due blast_search on that vein; the version included here is the one I currently use with regularity and find very useful, but it's ugly, and currently does not work with CompBio.pm. I do plan on writing something to do the same basic task, blasting large sequence files against eachother and/or self searching a single set, once the CompBio stuff is stable (and I've had a chance to consider some of the programs already available to do the same basic thing).
+
+OK, so some brief descriptions:
+
+compare_fields:
+
+A feature rich (probably too so) tool for comparing fields in two value seperated files. Although we now use MySQL and sql or the database interfaces for most work on our standard datasets, I still find it very handy to use on a regular basis. It considers one file the key, and one the query, outputing records from the query file where the requested field from each match. The field delimiter, which fields from each file, and case sensitivity can all be modified on the command line. You can also choose to keep some or all of the fields from the key file in the output, and the key or query file can be piped in. Another option it has is to print out only the records in the query that do _not_ match a record in the key file; an anti-join, and one of the initial motivations for creating this util.
+
+seqpat:
+
+Looks for the suplied perl regular expresion in a table format (tab delimited) sequence file. Will print the start and stop postions of each match (will find multiple non-overlapping matches in the same sequence), the positions and the matched seqment, or the sequence in lower case with the matched region uppercased.
+
+show_all_chars:
+
+Simple tool for changing tabs, newlines, etc. into readable representations, such as /t, /r, /n, etc. Usefull when trying to figure out why the parser that worked the last 10 times barfed on the latest data, particularly for tab/space losses and conversions.
+
+blast_search:
+
+As mentioned above, either searches a sequence set against itself to reduce redundancy, or handles searching two sets of sequences using blast. The main win is that it not only manages running the blast over and over again (we were using the free version of WUBlast when I developed this), but it parses the output and logs the results. In the task we use it for most commonly, blasting a newly completed genome against all the sequences in our database + swissprot + PDB, this means one tab delimited file with the results is all there is to manage when the job is done. Passes any parameters you want to blast. Uses blastp by default, but can use any blast and database prep tool instructed. The version included uses BMERC::bio's blast function, so this probably wont be useful to anyone as is - the next version will use CompBio.pm as mentioned above.

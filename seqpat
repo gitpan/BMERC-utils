@@ -1,0 +1,69 @@
+#!/usr/local/bin/perl -w
+
+use strict;
+#use BMERC::bio('');
+
+if($ARGV[0] =~ /\?$|^-?help$|^-?h$/i || ! defined $ARGV[0]){
+    print <<HELP_LINES;
+    
+Requires two arguments, a '' enclosed regular expresion(perl) and
+a sequence or set of sequences in table format. Optional second argument
+(yes, between regex and seqs) is -seq or -mat. Return fields are tab delimited.
+
+Default is to return the ids that contained a match and the start and stop
+positions of the match.
+
+-mat returns the portion of the sequence matched as well.
+
+-seq returns the ids and sequences, with matched region upercased and unmatched
+region(s) in lowercase.
+
+Be warned, this is a very simple regex plugin of the suplied expresion. This
+script should be considered insecure as it currently is implimented.
+
+To do: fa to tbl conversions on the fly when necisary. Handleing () in the
+supplied expresion (without using the dreaded \$&) - currently () in suplied
+regex will break seqpat.
+    
+Copyright Sean Quinlan, Trustees of Boston University 2000-2001.
+
+HELP_LINES
+exit;
+}#if
+
+my $seq_rpt = my $match_rpt = "";
+
+my $regex = shift;
+# need to count () sets in regex and adjust $2 accordingly - so much for use strict
+if ($ARGV[0] && $ARGV[0] =~ /^-?seq$/) { $seq_rpt = shift }
+elsif ($ARGV[0] && $ARGV[0] =~ /^-?mat$/) { $match_rpt = shift }
+
+
+while(<>) {
+    chomp;
+    my @fields = split;
+    # print "$fields[0]\n";
+    my $x=0;
+    my @pos = ();
+    while ($fields[1] =~ /([A-Za-z\.]+?)($regex)([A-Za-z\.]+?)/g) {
+    	$x += length($1);
+	print "$fields[0]\t",$x+1,"\t",$x + length($2) unless $seq_rpt;
+	if ($match_rpt) { print "\t",$2 }
+	print "\n" unless $seq_rpt;
+	$pos[@pos] = [($x,length($2))];
+	$x += length($2)+1;
+    } # find expresion
+    if ($seq_rpt) {
+    	foreach my $AR_pos (@pos) {
+	    my ($f,$m) = @$AR_pos; # front and match length
+    	    print "$fields[0]:",$f+1,"\t",lc(substr($fields[1],0,$f)),
+	    	uc(substr($fields[1],$f,$m)),
+		lc(substr($fields[1],$f+$m)),"\n";
+    	} # foreach
+    } # if
+} # while
+
+
+
+
+

@@ -1,0 +1,519 @@
+#!/usr/local/bin/perl
+
+use strict;
+use Getopt::Long;
+use BMERC::bio qw(parse_blast tbl_to_fa blast check_type);
+use BMERC::db qw(list_to_seqs db_connect);
+use warnings;
+# use diagnostics;
+
+use lib "/home1/staff/seanq/lib";
+require "file_conversions.pl";
+our $VERSION = '0.7.3';
+
+
+if(! defined $ARGV[0]){
+    print "blast_search(ver.$VERSION) <-help|-h> <-rpt %> <-rmv %> <-q query_file> <-align> <-debug|d>
+    	<-pdb_search> <-t temp_dir> <-o filtered_output> <-l log_file> <-f> <-e> <-v+>
+	<-s homol_file> <-p 'blast parameters'> <-m blast_method> <-dbprep blast_prep>\n";
+    exit;
+}#if
+
+my %opt = ();
+my $result = GetOptions(\%opt,"align","blast_server=s","rmv=i",'pdb_search',"rpt=i",
+    "t=s","o=s",'help|h',"l=s","q=s","f","e","s=s","p=s","m=s",'debug|d','v+',
+    'dbprep=s');
+
+if ($opt{"help"}) { exec "perldoc $0" }
+my $db = shift || die "\nNo file for searching provided.\n\n";
+
+my $dbh = db_connect;
+
+=head1 NAME
+
+blast_search - use blast to compare large sets of data
+
+=head1 SYNOPSIS
+
+blast_search <options> search_file
+
+<-help|-h> <-rpt report_min%> <-rmv filter_min%> <-q query_file> <-align> <-debug|d>
+<-pdb_search> <-t temp_dir> <-o filtered_output> <-l log_file> <-f> <-e> <-v|vv>
+<-s homol_file> <-p 'blast parameters'> <-m blast_method> <-dbprep blast_prep>\n";
+
+=head1 DESCRIPTION
+
+Use blast (default is blastp) to search a query file against a sequence database, or 
+search the database against itself. Can be set to filter database in self search mode,
+reducing redundancy above threshold.
+
+This tool was developed using WU-blast 2.0a8MP.
+
+OPTIONS:
+
+=over
+
+=item B<rpt>
+
+Equivelent identity minimum (as percentage) to be considered as a homolouge
+for logging. Default value is 20.
+
+=item B<l>
+
+Log the results of the search. Include full path or log will be placed in
+current working directory (or temp directory if defined with -t option).
+Log file reports the ~#_eff_identities and equiv_identities(as dec. value).
+
+=item B<rmv>
+
+Equivelent identity minimum (as percentage) to be considered as a homolouge
+for filtering. Default value is 40.
+
+=item B<align>
+
+Will add report of basic alignments for all matches that returned
+an alignment (see -B blast option). Adds four fields to the end of each log
+entry, the start and stop alignment possitions of the query and match, in that
+order.
+
+=item B<t>
+
+Temp directory to use, defaults to current working directory
+
+=item B<q>
+
+Query file to use in search. .tbl format prefered. If not a sequence file and
+not empty, will assume query file contains a list of sequence id's and will
+try to fetch sequences from database. See BMERC::db::list_to_seqs for deatils
+on what databases are searched. This is still experimental.
+
+=item B<f>
+
+Filter out matches. This removes all matches above cutoff from database.
+Removed sequences will not be searched or used as a query. Note - this feature
+is currently disabled when using a seperate query file.
+
+=item B<o>
+
+Name for non-redundant file to be output as. Defaults to blast.fa in the temp
+directory. If filename provided ends in .tbl, output file will be in table
+format. Otherwise output is in fasta format. If output file name given is the
+same as the search_file, a copy of search_file with .orig appended will be made
+before final file is written. Extra blast files will be removed.
+
+=item B<m>
+
+Blast type. Defaults to blastp. If using blastn will need to set parameters
+yourself because BLOSUM62 is for protein databases.
+
+=item B<p>
+
+blast parameters. Defaults to -e=1e-1 -B=0 -matrix=BLOSUM62. -B will always be
+set to 0, unless the align option is specified. All paramaters given in this
+option must be in quotes.
+
+=item B<blast_server>
+
+Specify what machine to run blast on. Requires passwordless rsh privileges
+to blast server.
+
+=item B<pdb_search>
+
+Checks for dssp file to exist - this is for biasing the creation of a filtered
+(minimally redundant) PDB database to use PDB's with dssp information as the
+representative.
+
+=item B<dbprep>
+
+Method to use for preparing blast database.
+
+=item B<e>
+
+Reports the raw score and e value from blast in the log file.
+
+=item B<s>
+
+Save file of all homogulous families - file name required. Experimental
+Note - The filter flag needs to be off if saving homs. (at least for now)
+
+=item B<help> or B<h>
+
+This printout.
+
+=back
+
+=cut
+
+# this is starting to look really sloppy!
+
+$opt{'debug'} = 1 if $opt{'v'};
+my ($Qfile,$cutoff,$outdir,$method,$params,$blast_file,$final_fa,$filter,$db_prep,$m_num,$noise) = &check_opts(\%opt,$db);
+
+# Backup origonal search file if overwrite requested
+`cp -f $db $db.orig` if $db eq $final_fa; # still using a system call?!?
+# should probably make a die handler to that invokes &sig_int
+$SIG{INT} = \&sig_int; # Do some file CLEANUP when told to die
+$| = 1; # unbuffered output to have pretty . progress work nice
+
+my ($db_type,$Qptr,$key,$Qfile_type,$blast,$hit);
+my $hit_flag = my $n = 0;
+my (%search,%rmvd,%len,%Query,%hits,%align);
+my (@fa,@homs,@CLEANUP);
+$CLEANUP[@CLEANUP] = $blast_file;
+
+## prepare files for use - this is still really clumsy
+if ($opt{'q'}) {
+	$Qfile_type = &check_type($Qfile);
+    	if ($Qfile_type eq "UNKNOWN" && -e $Qfile && -T $Qfile) {
+		my $new_query = "$outdir/query.tbl";
+		unless (open(OUT,"> $new_query")) {
+			warn "Can't open OUT to write query file from db: $!";
+			&sig_int;
+		} # can't write new seq tbl file
+    		print OUT tbl_to_fa(list_to_seqs($Qfile));
+		$Qfile = $new_query;
+		$CLEANUP[@CLEANUP] = $Qfile;
+	} # if probable id list for db fetch
+	elsif ($Qfile_type eq "UNKNOWN") {
+		warn "Can't set query file or fetch from db\n";
+		&sig_int;
+	} # oh well
+	elsif ($Qfile_type eq "FA") {
+		my $new_query = "$outdir/query.tbl";
+		&FC_fa_to_tbl($Qfile,$new_query);
+		$Qfile = $new_query;
+		$CLEANUP[@CLEANUP] = $Qfile;
+	} # make copy in .tbl format
+	%Query = &tbl_id_hash($Qfile);
+} # if using seperate query file, make sure it's in .tbl format and hash id's
+
+$db_type = &check_type($db);
+if ($db_type eq "UNKNOWN") { warn "Couldn't determine file type of $db: $!";&sig_int }
+$Qfile_type = $db_type unless $opt{'q'};
+
+if ($db_type eq "FA") {
+    my $new_db = "$outdir/db.tbl";
+    &FC_fa_to_tbl($db,$new_db);
+    $db = $new_db;
+    $CLEANUP[@CLEANUP] = $db;
+    $Qfile = $new_db unless $opt{'q'};
+} # if $db is a .fa file - convert to .tbl
+
+# build id and length hashes for database
+%search = &tbl_id_hash($db);
+%len = &db_seq_lens($db);
+
+# generate first blastable database
+&FC_tbl_to_fa($db,$blast_file);
+`$db_prep $blast_file`;
+
+if ($opt{'q'}) { $Qptr = \%Query }
+else { $Qptr = \%search }
+
+open (LOG,"> $opt{'l'}") or die "Can't write LOG $opt{'l'}: $!" if $opt{l};
+
+my $query_file = "$outdir/$$.fa";
+$CLEANUP[@CLEANUP] = $query_file;
+
+# begin searching
+foreach $key (sort keys %{$Qptr}) {
+    chomp($key);
+    if ($opt{'pdb_search'}) {
+    	my $pdb = lc(substr($key,0,4));
+    	next unless (-e "/structure/dssp/pdb$pdb.ent.out");
+    } # if searching pdb's
+
+    if (! defined $rmvd{$key}) { # make sure still valid id - relevant to self searching
+    	if ($opt{'f'}) { # rewrite blastfile if filtering
+	    open (SEARCH,$db) or die "Can't open SEARCH $db to rewrite blastfile: $!";
+	    open (BLASTFILE,"> $blast_file") or die "Can't open BLASTFILE $blast_file: $!";
+	    while (defined(my $seq = <SEARCH>)) {
+	    	chomp($seq);
+		my @temp_seq = split(/\t/,$seq);
+		next unless $search{$temp_seq[0]};
+		$temp_seq[1] =~ s/\*\.\!/X/g;
+		$seq = "$temp_seq[0]\t$temp_seq[1]\n";
+	    	print BLASTFILE tbl_to_fa($seq);	    
+	    } # while rewriting blastfile
+    	    close BLASTFILE or die "Can't close BLASTFILE $blast_file: $!";
+	    print "Finished writing blast.fa for the ",$n++," time.\n" if $opt{'debug'};
+    	    close SEARCH or die "Can't close SEARCH $db: $!";
+	    `$db_prep $blast_file`;
+	} # if
+	
+	# make a query file for the current query sequence
+    	open (QUERY,"> $query_file") or die "Can't open QUERY $query_file: $!";
+	# here's a horrible bottleneck. Maybe index positions when doing initial
+	# setup and seek/read? What about when filtering?
+	# and why not use database to fetch seqs instead of uniform file
+	# setup from above? Or create a BDB file at least!? Anything but
+	# a grep syscall!
+	my $Qseq = `grep "^$key\t" $Qfile`;
+	die "Data mangled, could not find $key in query file $Qfile $!" if length($Qseq) < 2;
+	print QUERY tbl_to_fa($Qseq);
+    	close QUERY or die "Can't close QUERY $query_file: $!";
+    	
+# blast query against blast file and parse results
+	print ".";
+	
+	# temp kludge
+	my $bn = 0;
+	if ($opt{'v'} && $opt{'v'} > 1) { $bn = $opt{'v'} }
+    	$blast = blast($method,$blast_file,$query_file,"$params",$noise,$opt{'blast_server'});
+    	%hits = parse_blast($blast,$cutoff,\%len,$m_num,$opt{e},$bn,$opt{'align'});
+	print "hits{key} = " , $hits{$key} , "\n" if (defined $hits{$key} && $opt{'debug'});
+
+	if ($hits{'alignments'}) {
+	    %align = %{$hits{'alignments'}};
+	    delete($hits{'alignments'});
+	}
+	else { %align = () }
+	
+	# filtering should really be a second step after initial loging loop
+	# to allow choosing to delete only near full length matched sequences
+	# to be reduced to one representative!
+    	foreach $hit(keys %hits) {
+	    if ($hit ne $key) {
+	    	my @hit_fields = split(/\t/,$hits{$hit});
+    	    	$hit_flag = 1;
+            	push(@homs,$hit) if $opt{'s'};
+            	$rmvd{$hit} = 1 if ($opt{'f'} && ! $opt{'q'} && ($hit_fields[1] * 100) > $filter);
+    	    	delete $search{$hit} if ($opt{'f'} && ($hit_fields[1] * 100) > $filter);
+		my $FH_temp = select(LOG);
+		if ($opt{"l"}) {
+		print "$key\t$hit\t$hits{$hit}";
+		if ($align{$hit}) { print "\t",join("\t",@{$align{$hit}}) }
+		elsif ($opt{'align'}) { print "\t\t\t\t" }
+		print "\n";
+		} # if logging
+		select $FH_temp;
+		print "logging $key\t$hit\t$hits{$hit}\n" if $opt{'debug'};
+	    } # if
+    	} # foreach
+	
+	push(@homs,$key) if ($opt{'s'} && $hit_flag);
+	$hit_flag = 0;
+    
+	%hits = ();
+
+    } # if valid id
+
+} # for each query sequence
+
+close LOG or die "Can't close LOG $opt{'l'}: $!" if $opt{'l'};
+print "\n";
+if ($opt{'o'}) {
+	if ($final_fa =~ /\.tbl$/) {
+		&FC_fa_to_tbl($blast_file,$final_fa);
+	} # if .tbl output requested
+	else { 
+		`cp -f $blast_file $final_fa`
+	}
+} # if output filename provided
+
+# should add files to @CLEANUP when blast type determined
+# this should also all be added to an END block, or invoked as a seperate
+# routine, which &sig_int would also call
+if ($method eq "blastn" && -e $blast_file) {
+    unlink ("$blast_file.nhd","$blast_file.ntb","$blast_file.csq") or warn "Couldn't delete blast database files: $!";
+} # if blastn
+elsif (-e $blast_file) {
+    unlink ("$blast_file.ahd","$blast_file.atb","$blast_file.bsq") or warn "Couldn't delete blast database files: $!";
+} # else
+foreach my $file (@CLEANUP) {
+    print "-$file\n" if $opt{'debug'};
+    unless($file eq $final_fa) { unlink $file or warn "Couldn't delete $file: $!" }
+} # foreach file to be removed
+unless ($opt{'f'}) { unlink $final_fa or warn "Couldn't remove $final_fa: $!" }
+
+exit;
+
+####
+####
+
+sub check_opts {
+    my $R_opt = shift;
+    my $data_file = shift;
+    my $m_num = 5.2;
+    my $db_prep = $$R_opt{'dbprep'} || "/opt/bin/setdb";
+    unless ($$R_opt{'dbprep'} || -e $db_prep) {
+	if (-e "/usr/local/bin_bmerc/setdb") { $db_prep = "/usr/local/bin_bmerc/setdb" }
+    	elsif (-e "/usr/local/bin/setdb") { $db_prep = "/usr/local/bin/setdb" }
+	else { die "Can't locate setdb" }
+    } # set prep method
+    $db_prep .= " -k";
+
+    my $Qfile = $$R_opt{'q'} || $data_file; # if no query file provided use database for self query
+    my $cutoff = $$R_opt{'rpt'} || 20;
+    my $filter = $$R_opt{'rmv'} || 40;
+    my $outdir = $$R_opt{t} || $ENV{"PWD"};
+    $outdir =~ s/\/$//; #strip trailing slash in directory
+    my $noise = "quiet";
+    $noise = $opt{'v'} if ($opt{'v'} && $opt{'v'} > 1);
+#    my $noise ="quiet";
+    
+# Look for blast file reporting, and get a logfile name if none provided
+    if ($$R_opt{e} && ! $$R_opt{l}) {
+    	print "\nBlast e value reporting requested without name for logfile provided.\n";
+    	my $temp_in = "";
+    	while (! $temp_in) {
+    	    print "Please suply a name for the logfile, or enter Q to quit: ";
+    	    chomp($temp_in = <STDIN>);
+    	} # get log file name or quit command
+    	if ($temp_in =~ /Q|q/) { exit }
+    	else { $$R_opt{'l'} = $temp_in }
+    } # if not log while e requested
+
+    if ($filter < $cutoff && $$R_opt{'f'}) {
+    	print "Can not filter unreported matches. Increasing rmv value to $cutoff.\n";
+	$filter = $cutoff;
+    } # if filtering min less than reporting min
+
+# if no path information provided with log file add path for output directory
+    if ($$R_opt{'l'} && $$R_opt{'l'} !~ /\//) {
+    	my $temp = $$R_opt{'l'};
+    	$$R_opt{'l'} = "$outdir/$temp";
+    } # log file does not contain path info
+
+# set up and check blast method and parameters
+    my $method = $$R_opt{'m'} || "blastp";
+    if ($method ne "blastp" && ! $$R_opt{'p'}) {
+    	warn "Please submit parameters if not using blastp\n";
+	print "Parameters to use[-B=0 -e=1e-3]?";
+	chomp(my $temp = <STDIN>);
+	$$R_opt{'p'} = $temp || "-B=0 -e=1e-3";
+    } # if no params given for other than blastp
+    if ($method ne "blastp") {
+    	print "blast will currently use $db_prep to prepare database."
+	    . " If this is not correct, please change, otherwise hit return: ";
+	chomp(my $temp = <STDIN>);
+	$db_prep = $temp || $db_prep;
+    } # if other than setdb needed
+    my $n = 0;
+    $n = 200 if $$R_opt{'align'};
+    my $params = $$R_opt{'p'} || "-B=$n -e=1e-1 -matrix=BLOSUM62";
+
+    #$params .= " -B=0" if $params !~ /-B=\d+/;
+
+# Make sure filtering off if homs file output requested
+    if ($$R_opt{'s'} && $$R_opt{f}) { die "Saving homs and filtering db at the same time has not been tested.\n $!" } 
+    my $blast_file = "$outdir/$$-blast.fa";
+    
+    if ($$R_opt{o} && ! $$R_opt{'f'}) {
+    	if ($data_file eq $$R_opt{'o'}) { 
+    	    warn "You have requested to overwrite original search file with unmodified version of itself. Request ignored. Really now...\n";
+    	    $$R_opt{'o'} = undef;
+    	} # if 
+    	else {
+    	    warn "Output file requested without filtering, try using cp instead!\n";
+	    print "Do you still want to output unchanged file [NO]? ";
+	    chomp(my $temp = <STDIN>);
+	    if ($temp !~ /ye?s?/i) { $$R_opt{'o'} = undef }
+	} # else
+    } # output of unfiltered file requested
+    
+# If no output file name provided, set to blast_file (will be deleted)
+    my $final_fa = $$R_opt{o} || $blast_file;
+    
+    if ($method eq "blastn") {
+    	$db_prep = "/opt/bin/pressdb";
+	$m_num = 5;
+    }
+    
+    if ($opt{'debug'}) {
+    	print "Options returned after init:\n";
+    	print "Qfile=$Qfile\tcutoff=$cutoff\tfilter=$filter\toutdir=$outdir\n";
+    	print "params=$params\tblast_file=$blast_file\tfinal_fa=$final_fa\n";
+    	print "db_prep=$db_prep\tmethod=$method\tm_num=$m_num\tnoise=$noise\n";
+    } # if debug on
+    
+    return ($Qfile,$cutoff,$outdir,$method,$params,$blast_file,$final_fa,$filter,$db_prep,$m_num,$noise);
+} # check_opts
+
+sub db_seq_lens {
+    my $file = shift;
+    my %hash = ();
+#    print "$file\n";
+    open (QFILE,$file) or die "Can't open QFILE $file: $!";
+    while(<QFILE>) {
+    	chomp;
+	/^(.+)\t(.+)$/;
+	warn "problems building lengths hash: _=$_\n1=$1\n2=$2\n" unless ($1 && $2);
+	$hash{$1} = length($2) if defined $2;
+    } # while
+    
+    return %hash;	
+} # db_seq_lens
+
+sub tbl_id_hash {
+    my $file = shift;
+    my %hash = ();
+    
+    open (QFILE,$file) or die "Can't open QFILE $file: $!";
+    while(<QFILE>) {
+    	chomp;
+	/^(.+?)\t/;
+	$hash{$1} = $1;
+    } # while
+    close QFILE or die "Can't close QFILE $Qfile: $!";
+    
+    return %hash;
+} # tbl_id_hash
+
+#
+
+sub sig_int {
+    if ($method eq "blastn" && -e $blast_file) {
+    	unlink ("$blast_file.nhd","$blast_file.ntb","$blast_file.csq") or warn "Couldn't delete blast database files: $!";
+    } # if blastn
+    elsif (-e $blast_file) {
+    	    unlink ("$blast_file.ahd","$blast_file.atb","$blast_file.bsq") or warn "Couldn't delete blast database files: $!";
+    } # else
+    
+    foreach my $file (@CLEANUP) {
+    	print "-$file\n" if $opt{'debug'};
+    	unless($file eq $final_fa) { (unlink $file or warn "Couldn't delete $file: $!") if -e $file }
+    } # foreach file to be removed
+    (unlink $query_file or die "Can't unlink QUERY $query_file: $!") if ($query_file && -e $query_file);
+
+    print "\nRecieved interupt from user or died before completion.\n";
+    print "blast.fa*,query.tbl, and db.tbl have been deleted\n";
+    exit;
+} # sig_quit
+
+END { $dbh->disconnect if $dbh; }
+
+=head1 TODO
+
+general code cleanup - notes and temp. solutions are reaching critical mass,
+time for a new version!
+
+add file locks for query file
+
+try not copying blast file if write permisions on directory where located or 
+blastp and blastp fa extensions available already (unless
+filtering of course). Use existing files where possible.
+
+finish updating documentation and fleshing out versitility
+
+look for better ways to use database
+
+This code could badly stand to be optimized, particularly in memory management
+
+=head1 COPYRIGHT
+
+Copyright Sean Quinlan, Trustees of Boston University 2000-2001.
+
+=head1 AUTHOR
+
+Sean Quinlan, seanq@darwin.bu.edu
+
+Please email me with any changes you make or suggestions for changes/additions. Thank you!
+
+=head1 SEE ALSO
+
+perl(1), BMERC::bio, BMERC::db.
+
+=cut
+
+__END__
